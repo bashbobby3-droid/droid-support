@@ -359,7 +359,7 @@ class CryptoIssueMonitor:
 
 ---
 
-### 📞 Official Support Contacts:
+###  Official Support Contacts:
 - [Support Portal](https://gitdapps-auth.web.app)
 - Email: Git_response@proton.me
 

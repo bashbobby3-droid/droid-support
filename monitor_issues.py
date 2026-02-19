@@ -308,57 +308,8 @@ class CryptoIssueMonitor:
         # Fall back to reporter
         return issue['user']['login']
     
-    def mention_real_owner_in_our_issue(self, our_issue_number: int, real_owner: str, source_repo: str):
-        """Tag the REAL owner with professional message (with cooldown check)"""
-        
-        # Check cooldown before tagging
-        if not self.can_tag_user(real_owner):
-            return False
-        
-        url = f'https://api.github.com/repos/{self.target_repo}/issues/{our_issue_number}/comments'
-        
-        comment_body = f"""Dear @{real_owner},
-
-We have identified your issue and it has been formally logged within our support management system for review.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔐 OFFICIAL SUPPORT CHANNELS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-▸ [Support Portal](https://gitdapps-auth.web.app)
-▸ Direct Email: Git_response@proton.me
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-A qualified support engineer has been assigned to your case.
-Please reach out through the official channels above for direct assistance.
-
-We appreciate you bringing this to our attention.
-
-Regards,
-GitDapps | Technical Support Team
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
-        
-        payload = {'body': comment_body}
-        
-        try:
-            # Add random delay before tagging
-            self.random_delay()
-            
-            response = requests.post(url, headers=self.headers, json=payload, timeout=10)
-            if response.status_code == 201:
-                print(f"   🔔 Tagged REAL owner @{real_owner}")
-                self.record_user_tag(real_owner)
-                return True
-            else:
-                print(f"   ⚠️  Could not tag: {response.status_code}")
-                return False
-        except Exception as e:
-            print(f"   ⚠️  Exception: {str(e)}")
-            return False
-    
     def create_issue_in_target_repo(self, original_issue: Dict, source_repo: str):
-        """Create issue with professional table format"""
+        """Create issue with @mention in body for notification"""
         url = f'https://api.github.com/repos/{self.target_repo}/issues'
         
         original_body = original_issue.get('body', '') or '*No description provided*'
@@ -370,6 +321,15 @@ GitDapps | Technical Support Team
         priority_label = self.detect_priority(original_issue)
         print(f"   🎯 Priority: {priority_label}")
         
+        # Check cooldown before tagging
+        include_mention = self.can_tag_user(real_owner)
+        if include_mention:
+            self.record_user_tag(real_owner)
+            mention_line = f"👋 **Hello:** @{real_owner}"
+            print(f"   🔔 Will notify @{real_owner} in issue body")
+        else:
+            mention_line = f"**User:** {real_owner}"
+        
         duplicates = self.check_for_duplicates(issue_title, original_body)
         duplicate_section = ""
         if duplicates:
@@ -378,14 +338,15 @@ GitDapps | Technical Support Team
             for dup in duplicates[:3]:
                 duplicate_section += f"- #{dup['number']}: [{dup['title']}]({dup['url']}) (Similarity: {dup['similarity']:.0%})\n"
         
-        new_body = f"""## 📋 Support Case Opened
+        new_body = f"""## 📋 Support Case from @{real_owner}
+
+{mention_line}
 
 | Field | Details |
 |-------|---------|
 | **Source** | {source_repo} |
 | **Case Ref** | #{original_issue['number']} |
 | **Reporter** | @{source_user} |
-| **Owner** | @{real_owner} |
 | **Priority** | {priority_label} |
 | **Status** | 🟡 Under Review |
 
@@ -404,8 +365,7 @@ GitDapps | Technical Support Team
 
 ---
 
-> *This case has been logged by GitDapps Support Infrastructure.
-> All rights reserved.*
+> *This case has been logged by GitDapps Support Infrastructure.*
 """
         
         labels = ['auto-detected', priority_label]
@@ -524,11 +484,6 @@ GitDapps | Technical Support Team
                     if created:
                         total_issues_created += 1
                         self.processed_issues.add(issue_id)
-                        self.mention_real_owner_in_our_issue(
-                            created['issue']['number'],
-                            created['real_owner'],
-                            repo
-                        )
                 else:
                     # Mark as processed to avoid checking again
                     self.processed_issues.add(issue_id)

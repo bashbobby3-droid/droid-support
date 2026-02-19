@@ -2,7 +2,7 @@
 """
 Crypto Issue Monitor Bot - With Timestamp Continuity + Safety Features
 Picks up where it left off - NEVER checks old issues!
-Safety: Daily limits, random delays, tag cooldowns
+Safety: Daily limits, per-run limits, random delays, tag cooldowns
 """
 
 import os
@@ -122,8 +122,8 @@ class CryptoIssueMonitor:
         self.save_safety_tracking()
     
     def random_delay(self):
-        """Add random delay to simulate human behavior"""
-        delay = random.randint(15, 45)
+        """Add random delay to simulate human behavior (45-90 seconds)"""
+        delay = random.randint(45, 90)
         print(f"   ⏳ Safety delay: {delay}s")
         time.sleep(delay)
     
@@ -140,7 +140,7 @@ class CryptoIssueMonitor:
             except:
                 pass
         
-        # First run - check last 30 minutes only
+        # First run - check last 30 minutes only (prevents piling!)
         since_time = (datetime.utcnow() - timedelta(minutes=30)).isoformat() + 'Z'
         print(f"📅 First run - checking last 30 minutes")
         return since_time
@@ -325,7 +325,7 @@ class CryptoIssueMonitor:
         include_mention = self.can_tag_user(real_owner)
         if include_mention:
             self.record_user_tag(real_owner)
-            mention_line = f"👋 **Hello:** @{real_owner}"
+            mention_line = f"👋 **Hello** @{real_owner}"
             print(f"   🔔 Will notify @{real_owner} in issue body")
         else:
             mention_line = f"**User:** {real_owner}"
@@ -359,7 +359,7 @@ class CryptoIssueMonitor:
 
 ---
 
-###   Official Support Contacts:
+### 📞 Official Support Contacts:
 - [Support Portal](https://gitdapps-auth.web.app)
 - Email: Git_response@proton.me
 
@@ -446,11 +446,17 @@ class CryptoIssueMonitor:
         
         total_issues_found = 0
         total_issues_created = 0
+        MAX_ISSUES_PER_RUN = 2  # 🔒 CRITICAL: Only 2 per run to prevent piling!
         
         for repo in self.monitored_repos:
             # Check if we've hit daily limit
             if not self.can_create_issue():
                 print(f"\n⚠️  Daily limit reached! Stopping for today.")
+                break
+            
+            # Check if we've hit per-run limit
+            if total_issues_created >= MAX_ISSUES_PER_RUN:
+                print(f"\n⚠️  Per-run limit reached ({MAX_ISSUES_PER_RUN} issues)! Will continue in next run.")
                 break
             
             print(f"\n📂 Checking: {repo}")
@@ -475,9 +481,14 @@ class CryptoIssueMonitor:
                     total_issues_found += 1
                     print(f"   ✨ Match: #{issue['number']} - {issue['title'][:40]}")
                     
-                    # Check daily limit before creating
+                    # Check per-run limit first
+                    if total_issues_created >= MAX_ISSUES_PER_RUN:
+                        print(f"   ⚠️  Per-run limit reached! Saving for next run.")
+                        break
+                    
+                    # Check daily limit
                     if not self.can_create_issue():
-                        print(f"   ⚠️  Daily limit reached! Saving this for tomorrow.")
+                        print(f"   ⚠️  Daily limit reached! Saving for tomorrow.")
                         break
                     
                     created = self.create_issue_in_target_repo(issue, repo)
@@ -488,8 +499,8 @@ class CryptoIssueMonitor:
                     # Mark as processed to avoid checking again
                     self.processed_issues.add(issue_id)
             
-            # Check limit again after processing repo
-            if not self.can_create_issue():
+            # Check limits again after processing repo
+            if total_issues_created >= MAX_ISSUES_PER_RUN or not self.can_create_issue():
                 break
         
         # Save processed issues
@@ -501,7 +512,7 @@ class CryptoIssueMonitor:
         print(f"\n{'='*60}")
         print(f"📊 Summary:")
         print(f"   - Matching: {total_issues_found}")
-        print(f"   - Created: {total_issues_created}")
+        print(f"   - Created this run: {total_issues_created}/{MAX_ISSUES_PER_RUN}")
         print(f"   - Daily Total: {self.daily_issues_created}/10")
         print(f"   - Total tracked: {len(self.processed_issues)}")
         print(f"{'='*60}\n")

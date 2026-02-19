@@ -1,8 +1,5 @@
 {
-  "daily_issues_created": 2,
+  "daily_issues_created": 0,
   "last_reset_date": "2026-02-19",
-  "user_tag_history": {
-    "Monero-Bro": "2026-02-19T15:11:44.709340",
-    "reservebtc": "2026-02-19T15:13:06.089974"
-  }
+  "user_tag_history": {}
 }

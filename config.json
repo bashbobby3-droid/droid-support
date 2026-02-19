@@ -1,8 +1,5 @@
 {
   "monitored_repos": [
-    "ethereum/go-ethereum",
-    "openclaw/clawhub",
-    "BlitzWallet/BlitzWallet",
     "juanroyongji/Support",
     "solana-labs/solana",
     "Peres99/support",
@@ -14,20 +11,12 @@
     "uniswap/v3-core",
     "cake-tech/cake_wallet",
     "aave/aave-v3-core",
-    "compound-finance/compound-protocol",
-    "MakerDAO/dss",
     "MetaMask/metamask-mobile",
-    "pimlicolabs/permissionless.js",
-    "OpenZeppelin/openzeppelin-contracts",
     "MetaMask/metamask-extension",
     "LedgerHQ/ledger-live",
-    "trezor/trezor-firmware",
-    "pancakeswap/pancake-frontend",
     "sushiswap/sushiswap",
     "curvefi/curve-contract",
     "balancer/balancer-v2-monorepo",
-    "yearn/yearn-vaults",
-    "convex-eth/platform"
   ],
   "keywords": [
     "wallet",

@@ -1,15 +1,5 @@
 {
-  "daily_issues_created": 10,
+  "daily_issues_created": 0,
   "last_reset_date": "2026-02-19",
-  "user_tag_history": {
-    "clawd800": "2026-02-19T07:20:24.636349",
-    "h1-hunt": "2026-02-19T07:20:49.800102",
-    "PaulDeFi": "2026-02-19T07:21:57.747606",
-    "bitcoinuser": "2026-02-19T07:22:25.125833",
-    "Tayyaba-22": "2026-02-19T07:22:49.562056",
-    "khiembka1992": "2026-02-19T07:23:13.533122",
-    "gitxmax": "2026-02-19T07:23:44.452247",
-    "khayklassic": "2026-02-19T07:24:27.716049",
-    "J-dashboard-lab1": "2026-02-19T07:25:09.739286"
-  }
+  "user_tag_history": {}
 }

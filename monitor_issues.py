@@ -1,532 +1,366 @@
-#!/usr/bin/env python3
-"""
-Crypto Issue Monitor Bot - With Timestamp Continuity + Safety Features
-Picks up where it left off - NEVER checks old issues!
-Safety: Daily limits, per-run limits, random delays, tag cooldowns
-"""
-
-import os
-import json
-import time
-import random
-import re
-from datetime import datetime, timedelta
-import requests
-from typing import List, Dict, Set, Optional
-from difflib import SequenceMatcher
-
-class CryptoIssueMonitor:
-    def __init__(self):
-        self.github_token = os.environ.get('GITHUB_TOKEN')
-        if not self.github_token:
-            raise ValueError("GITHUB_TOKEN environment variable not set")
-        
-        self.headers = {
-            'Authorization': f'token {self.github_token}',
-            'Accept': 'application/vnd.github.v3+json'
-        }
-        
-        self.target_repo = os.environ.get('TARGET_REPO')
-        self.load_config()
-        self.processed_issues = self.load_processed_issues()
-        self.load_safety_tracking()
-    
-    def load_config(self):
-        """Load monitoring configuration"""
-        with open('config.json', 'r') as f:
-            config = json.load(f)
-        
-        self.monitored_repos = config.get('monitored_repos', [])
-        self.keywords = config.get('keywords', [])
-        self.topics = config.get('topics', [])
-        
-        self.team_assignments = config.get('team_assignments', {
-            'wallet': ['@bashbobby3-droid'],
-            'security': ['@bashbobby3-droid'],
-            'bug': ['@bashbobby3-droid'],
-            'transaction': ['@bashbobby3-droid'],
-            'contract': ['@bashbobby3-droid'],
-            'gas-fee': ['@bashbobby3-droid'],
-            'help': ['@bashbobby3-droid'],
-            'general': ['@bashbobby3-droid']
-        })
-    
-    def load_processed_issues(self) -> Set[str]:
-        """Load list of already processed issues"""
-        if os.path.exists('processed_issues.json'):
-            with open('processed_issues.json', 'r') as f:
-                data = json.load(f)
-                return set(data.get('issues', []))
-        return set()
-    
-    def save_processed_issues(self):
-        """Save processed issues to file"""
-        with open('processed_issues.json', 'w') as f:
-            json.dump({'issues': list(self.processed_issues)}, f, indent=2)
-    
-    def load_safety_tracking(self):
-        """Load safety tracking data for daily limits and tag cooldowns"""
-        self.safety_file = 'safety_tracking.json'
-        if os.path.exists(self.safety_file):
-            with open(self.safety_file, 'r') as f:
-                data = json.load(f)
-                self.daily_issues_created = data.get('daily_issues_created', 0)
-                self.last_reset_date = data.get('last_reset_date', datetime.utcnow().date().isoformat())
-                self.user_tag_history = data.get('user_tag_history', {})
-        else:
-            self.daily_issues_created = 0
-            self.last_reset_date = datetime.utcnow().date().isoformat()
-            self.user_tag_history = {}
-        
-        # Reset daily counter if it's a new day
-        today = datetime.utcnow().date().isoformat()
-        if self.last_reset_date != today:
-            print(f"📅 New day detected! Resetting daily counter.")
-            self.daily_issues_created = 0
-            self.last_reset_date = today
-            self.user_tag_history = {}
-            self.save_safety_tracking()
-    
-    def save_safety_tracking(self):
-        """Save safety tracking data"""
-        with open(self.safety_file, 'w') as f:
-            json.dump({
-                'daily_issues_created': self.daily_issues_created,
-                'last_reset_date': self.last_reset_date,
-                'user_tag_history': self.user_tag_history
-            }, f, indent=2)
-    
-    def can_create_issue(self) -> bool:
-        """Check if we can create more issues today"""
-        MAX_DAILY_ISSUES = 10
-        return self.daily_issues_created < MAX_DAILY_ISSUES
-    
-    def can_tag_user(self, username: str) -> bool:
-        """Check if we can tag this user (2 hour cooldown)"""
-        COOLDOWN_HOURS = 2
-        if username not in self.user_tag_history:
-            return True
-        
-        last_tagged = datetime.fromisoformat(self.user_tag_history[username])
-        time_since_tag = datetime.utcnow() - last_tagged
-        
-        if time_since_tag.total_seconds() >= (COOLDOWN_HOURS * 3600):
-            return True
-        
-        print(f"   ⏰ Skipping tag for @{username} (cooldown active)")
-        return False
-    
-    def record_user_tag(self, username: str):
-        """Record that we tagged this user"""
-        self.user_tag_history[username] = datetime.utcnow().isoformat()
-        self.save_safety_tracking()
-    
-    def random_delay(self):
-        """Add random delay to simulate human behavior (45-90 seconds)"""
-        delay = random.randint(45, 90)
-        print(f"   ⏳ Safety delay: {delay}s")
-        time.sleep(delay)
-    
-    def get_last_check_time(self) -> str:
-        """Get timestamp of last check (for continuity!)"""
-        last_check_file = 'last_check_time.json'
-        if os.path.exists(last_check_file):
-            try:
-                with open(last_check_file, 'r') as f:
-                    data = json.load(f)
-                    last_time = data.get('last_check_time')
-                    print(f"📅 Continuing from: {last_time}")
-                    return last_time
-            except:
-                pass
-        
-        # First run - check last 30 minutes only (prevents piling!)
-        since_time = (datetime.utcnow() - timedelta(minutes=30)).isoformat() + 'Z'
-        print(f"📅 First run - checking last 30 minutes")
-        return since_time
-    
-    def save_last_check_time(self):
-        """Save current time as last check (for next run continuity!)"""
-        current_time = datetime.utcnow().isoformat() + 'Z'
-        with open('last_check_time.json', 'w') as f:
-            json.dump({'last_check_time': current_time}, f, indent=2)
-        print(f"💾 Saved checkpoint: {current_time}")
-    
-    def check_rate_limit(self):
-        """Check GitHub API rate limit"""
-        response = requests.get('https://api.github.com/rate_limit', headers=self.headers)
-        if response.status_code == 200:
-            data = response.json()
-            remaining = data['rate']['remaining']
-            reset_time = datetime.fromtimestamp(data['rate']['reset'])
-            print(f"📊 API Rate Limit: {remaining} requests remaining (resets at {reset_time})")
-            return remaining
-        return 0
-    
-    def get_recent_issues(self, repo: str, since_time: str) -> List[Dict]:
-        """Get issues created AFTER last check (continuity!)"""
-        url = f'https://api.github.com/repos/{repo}/issues'
-        params = {
-            'state': 'open',
-            'since': since_time,
-            'per_page': 30,
-            'sort': 'created',
-            'direction': 'desc'
-        }
-        
-        try:
-            response = requests.get(url, headers=self.headers, params=params, timeout=10)
-            if response.status_code == 200:
-                issues = response.json()
-                return [issue for issue in issues if 'pull_request' not in issue]
-            else:
-                print(f"⚠️  Error fetching issues from {repo}: {response.status_code}")
-                return []
-        except Exception as e:
-            print(f"⚠️  Exception fetching issues from {repo}: {str(e)}")
-            return []
-    
-    def matches_criteria(self, issue: Dict) -> bool:
-        """Check if issue matches keywords"""
-        title = issue.get('title', '').lower()
-        body = issue.get('body', '') or ''
-        body = body.lower()
-        content = f"{title} {body}"
-        
-        for keyword in self.keywords:
-            if keyword.lower() in content:
-                return True
-        
-        return False
-    
-    def detect_priority(self, issue: Dict) -> str:
-        """Detect priority level"""
-        title = issue.get('title', '').lower()
-        body = (issue.get('body', '') or '').lower()
-        content = f"{title} {body}"
-        
-        if any(word in content for word in ['critical', 'urgent', 'emergency', 'security breach', 'exploit', 'hack', 'funds at risk', 'total loss']):
-            return 'priority-critical'
-        elif any(word in content for word in ['urgent', 'asap', 'immediately', 'cant access', 'locked out', 'lost funds']):
-            return 'priority-urgent'
-        elif any(word in content for word in ['high', 'important', 'stuck', 'frozen', 'missing balance']):
-            return 'priority-high'
-        elif any(word in content for word in ['minor', 'low', 'suggestion', 'enhancement', 'feature request']):
-            return 'priority-low'
-        else:
-            return 'priority-medium'
-    
-    def similarity(self, text1: str, text2: str) -> float:
-        """Calculate similarity"""
-        return SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
-    
-    def check_for_duplicates(self, issue_title: str, issue_body: str) -> List[Dict]:
-        """Check for duplicates"""
-        url = f'https://api.github.com/repos/{self.target_repo}/issues'
-        params = {'state': 'open', 'per_page': 10, 'sort': 'created', 'direction': 'desc'}
-        
-        try:
-            response = requests.get(url, headers=self.headers, params=params, timeout=10)
-            if response.status_code == 200:
-                existing_issues = response.json()
-                duplicates = []
-                
-                for existing in existing_issues:
-                    title_similarity = self.similarity(issue_title, existing['title'])
-                    if title_similarity >= 0.7:
-                        duplicates.append({
-                            'number': existing['number'],
-                            'title': existing['title'],
-                            'url': existing['html_url'],
-                            'similarity': title_similarity
-                        })
-                
-                return duplicates
-            return []
-        except Exception as e:
-            print(f"   ⚠️  Error checking duplicates: {str(e)}")
-            return []
-    
-    def get_assignee_for_category(self, category: str) -> str:
-        """Get assignee"""
-        assignees = self.team_assignments.get(category, self.team_assignments.get('general', []))
-        return assignees[0] if assignees else None
-    
-    def find_real_issue_owner(self, issue_body: str) -> Optional[str]:
-        """Find real owner from @mentions"""
-        if not issue_body:
-            return None
-        
-        mentions = re.findall(r'@([a-zA-Z0-9_-]+)', issue_body)
-        
-        if mentions:
-            real_owner = mentions[0]
-            print(f"   🔍 Found real owner: @{real_owner}")
-            return real_owner
-        
-        return None
-    
-    def get_original_issue_owner(self, issue_url: str) -> Optional[str]:
-        """Fetch original issue owner"""
-        match = re.search(r'github\.com/([^/]+)/([^/]+)/issues/(\d+)', issue_url)
-        if not match:
-            return None
-        
-        owner, repo, issue_num = match.groups()
-        original_repo = f"{owner}/{repo}"
-        
-        url = f'https://api.github.com/repos/{original_repo}/issues/{issue_num}'
-        
-        try:
-            response = requests.get(url, headers=self.headers, timeout=10)
-            if response.status_code == 200:
-                original_issue = response.json()
-                real_owner = original_issue['user']['login']
-                print(f"   🎯 Found REAL owner from original: @{real_owner}")
-                return real_owner
-            return None
-        except Exception as e:
-            print(f"   ⚠️  Could not fetch original: {str(e)}")
-            return None
-    
-    def find_real_owner(self, issue: Dict) -> str:
-        """Find the REAL owner"""
-        issue_body = issue.get('body', '') or ''
-        
-        # Look for GitHub issue links
-        github_links = re.findall(r'https://github\.com/[^/]+/[^/]+/issues/\d+', issue_body)
-        if github_links:
-            real_owner = self.get_original_issue_owner(github_links[0])
-            if real_owner:
-                return real_owner
-        
-        # Look for @mentions
-        real_owner = self.find_real_issue_owner(issue_body)
-        if real_owner:
-            return real_owner
-        
-        # Fall back to reporter
-        return issue['user']['login']
-    
-    def create_issue_in_target_repo(self, original_issue: Dict, source_repo: str):
-        """Create issue with @mention in body for notification"""
-        url = f'https://api.github.com/repos/{self.target_repo}/issues'
-        
-        original_body = original_issue.get('body', '') or '*No description provided*'
-        source_url = original_issue['html_url']
-        source_user = original_issue['user']['login']
-        issue_title = original_issue['title']
-        
-        real_owner = self.find_real_owner(original_issue)
-        priority_label = self.detect_priority(original_issue)
-        print(f"   🎯 Priority: {priority_label}")
-        
-        # Check cooldown before tagging
-        include_mention = self.can_tag_user(real_owner)
-        if include_mention:
-            self.record_user_tag(real_owner)
-            mention_line = f"👋 **Hello** @{real_owner}"
-            print(f"   🔔 Will notify @{real_owner} in issue body")
-        else:
-            mention_line = f"**User:** {real_owner}"
-        
-        duplicates = self.check_for_duplicates(issue_title, original_body)
-        duplicate_section = ""
-        if duplicates:
-            print(f"   🔍 Found {len(duplicates)} similar issue(s)")
-            duplicate_section = "\n\n## ⚠️ Possible Duplicates Detected\n\n"
-            for dup in duplicates[:3]:
-                duplicate_section += f"- #{dup['number']}: [{dup['title']}]({dup['url']}) (Similarity: {dup['similarity']:.0%})\n"
-        
-        new_body = f"""## 📋 Support Case from @{real_owner}
-
-{mention_line}
-
-| Field | Details |
-|-------|---------|
-| **Source** | {source_repo} |
-| **Case Ref** | #{original_issue['number']} |
-| **Reporter** | @{source_user} |
-| **Priority** | {priority_label} |
-| **Status** | 🟡 Under Review |
-
----
-
-### 📝 Issue Description:
-
-{original_body}
-{duplicate_section}
-
----
-
-###  Official Support Contacts:
-- [Support Portal](https://gitdapps-auth.web.app)
-- Email: Git_response@proton.me
-
----
-
-> *This case has been logged by GitDapps Support Infrastructure.*
-"""
-        
-        labels = ['auto-detected', priority_label]
-        
-        title_lower = issue_title.lower()
-        body_lower = original_body.lower()
-        content = f"{title_lower} {body_lower}"
-        
-        category = 'general'
-        if any(word in content for word in ['security', 'vulnerability', 'exploit', 'hack']):
-            category = 'security'
-        elif any(word in content for word in ['wallet', 'balance', 'account', 'private key', 'seed phrase', 'coinbase', 'metamask', 'ledger', 'trezor']):
-            category = 'wallet'
-        elif any(word in content for word in ['transaction', 'swap', 'transfer', 'tx']):
-            category = 'transaction'
-        elif any(word in content for word in ['contract', 'smart contract', 'solidity']):
-            category = 'contract'
-        elif any(word in content for word in ['gas', 'fee']):
-            category = 'gas-fee'
-        
-        labels.append(category)
-        labels.append(f'source:{source_repo.split("/")[0]}')
-        
-        if duplicates:
-            labels.append('possible-duplicate')
-        
-        assignee = self.get_assignee_for_category(category)
-        print(f"   👤 Assigned to: {assignee}")
-        
-        payload = {'title': f"[AUTO] {issue_title}", 'body': new_body, 'labels': labels}
-        
-        if assignee and assignee.startswith('@'):
-            payload['assignees'] = [assignee[1:]]
-        
-        try:
-            # Add random delay before creating issue
-            self.random_delay()
-            
-            response = requests.post(url, headers=self.headers, json=payload, timeout=10)
-            if response.status_code == 201:
-                new_issue = response.json()
-                print(f"✅ Created issue #{new_issue['number']}: {issue_title[:50]}...")
-                
-                # Increment daily counter
-                self.daily_issues_created += 1
-                self.save_safety_tracking()
-                
-                return {'issue': new_issue, 'real_owner': real_owner}
-            else:
-                print(f"⚠️  Failed: {response.status_code}")
-                return None
-        except Exception as e:
-            print(f"⚠️  Exception: {str(e)}")
-            return None
-    
-    def monitor_repositories(self):
-        """Main monitoring with continuity and safety limits!"""
-        print(f"\n{'='*60}")
-        print(f"🚀 Crypto Issue Monitor - With Continuity + Safety")
-        print(f"{'='*60}\n")
-        
-        remaining = self.check_rate_limit()
-        if remaining < 100:
-            print("⚠️  Low API rate limit...")
-            return
-        
-        # Check daily limit
-        if not self.can_create_issue():
-            print(f"⚠️  Daily issue limit reached ({self.daily_issues_created}/10)")
-            print(f"⚠️  Will resume tomorrow. Saving checkpoint...")
-            self.save_last_check_time()
-            return
-        
-        print(f"📊 Daily Progress: {self.daily_issues_created}/10 issues created today")
-        
-        # Get timestamp of last check (continuity!)
-        since_time = self.get_last_check_time()
-        
-        total_issues_found = 0
-        total_issues_created = 0
-        MAX_ISSUES_PER_RUN = 2  # 🔒 CRITICAL: Only 2 per run to prevent piling!
-        
-        for repo in self.monitored_repos:
-            # Check if we've hit daily limit
-            if not self.can_create_issue():
-                print(f"\n⚠️  Daily limit reached! Stopping for today.")
-                break
-            
-            # Check if we've hit per-run limit
-            if total_issues_created >= MAX_ISSUES_PER_RUN:
-                print(f"\n⚠️  Per-run limit reached ({MAX_ISSUES_PER_RUN} issues)! Will continue in next run.")
-                break
-            
-            print(f"\n📂 Checking: {repo}")
-            
-            issues = self.get_recent_issues(repo, since_time)
-            
-            if not issues:
-                print(f"   No new issues")
-                continue
-            
-            print(f"   Found {len(issues)} new issue(s)")
-            
-            for issue in issues:
-                issue_id = f"{repo}#{issue['number']}"
-                
-                # Skip if already processed
-                if issue_id in self.processed_issues:
-                    continue
-                
-                # Check if matches
-                if self.matches_criteria(issue):
-                    total_issues_found += 1
-                    print(f"   ✨ Match: #{issue['number']} - {issue['title'][:40]}")
-                    
-                    # Check per-run limit first
-                    if total_issues_created >= MAX_ISSUES_PER_RUN:
-                        print(f"   ⚠️  Per-run limit reached! Saving for next run.")
-                        break
-                    
-                    # Check daily limit
-                    if not self.can_create_issue():
-                        print(f"   ⚠️  Daily limit reached! Saving for tomorrow.")
-                        break
-                    
-                    created = self.create_issue_in_target_repo(issue, repo)
-                    if created:
-                        total_issues_created += 1
-                        self.processed_issues.add(issue_id)
-                else:
-                    # Mark as processed to avoid checking again
-                    self.processed_issues.add(issue_id)
-            
-            # Check limits again after processing repo
-            if total_issues_created >= MAX_ISSUES_PER_RUN or not self.can_create_issue():
-                break
-        
-        # Save processed issues
-        self.save_processed_issues()
-        
-        # CRITICAL: Save current time for next run continuity!
-        self.save_last_check_time()
-        
-        print(f"\n{'='*60}")
-        print(f"📊 Summary:")
-        print(f"   - Matching: {total_issues_found}")
-        print(f"   - Created this run: {total_issues_created}/{MAX_ISSUES_PER_RUN}")
-        print(f"   - Daily Total: {self.daily_issues_created}/10")
-        print(f"   - Total tracked: {len(self.processed_issues)}")
-        print(f"{'='*60}\n")
-
-def main():
-    """Main entry"""
-    try:
-        monitor = CryptoIssueMonitor()
-        monitor.monitor_repositories()
-        print("✅ Complete!\n")
-        
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        raise
-
-if __name__ == '__main__':
-    main()
+IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiIKQ3J5cHRvIElzc3VlIE1vbml0b3IgQm90IC0gUmV2
+b2x1dGlvbmFyeSBTbWFydCBQYXR0ZXJuCk1pbWljcyBodW1hbiBiZWhhdmlvciB3aXRoIHJhbmRv
+bWl6YXRpb24gYW5kIGJ1c2luZXNzIGhvdXJzIGF3YXJlbmVzcwoiIiIKCmltcG9ydCBvcwppbXBv
+cnQganNvbgppbXBvcnQgdGltZQppbXBvcnQgcmFuZG9tCmltcG9ydCByZQpmcm9tIGRhdGV0aW1l
+IGltcG9ydCBkYXRldGltZSwgdGltZWRlbHRhCmltcG9ydCByZXF1ZXN0cwpmcm9tIHR5cGluZyBp
+bXBvcnQgTGlzdCwgRGljdCwgU2V0LCBPcHRpb25hbApmcm9tIGRpZmZsaWIgaW1wb3J0IFNlcXVl
+bmNlTWF0Y2hlcgoKY2xhc3MgQ3J5cHRvSXNzdWVNb25pdG9yOgogICAgZGVmIF9faW5pdF9fKHNl
+bGYpOgogICAgICAgIHNlbGYuZ2l0aHViX3Rva2VuID0gb3MuZW52aXJvbi5nZXQoJ0dJVEhVQl9U
+T0tFTicpCiAgICAgICAgaWYgbm90IHNlbGYuZ2l0aHViX3Rva2VuOgogICAgICAgICAgICByYWlz
+ZSBWYWx1ZUVycm9yKCJHSVRIVUJfVE9LRU4gZW52aXJvbm1lbnQgdmFyaWFibGUgbm90IHNldCIp
+CiAgICAgICAgCiAgICAgICAgc2VsZi5oZWFkZXJzID0gewogICAgICAgICAgICAnQXV0aG9yaXph
+dGlvbic6IGYndG9rZW4ge3NlbGYuZ2l0aHViX3Rva2VufScsCiAgICAgICAgICAgICdBY2NlcHQn
+OiAnYXBwbGljYXRpb24vdm5kLmdpdGh1Yi52Mytqc29uJwogICAgICAgIH0KICAgICAgICAKICAg
+ICAgICBzZWxmLnRhcmdldF9yZXBvID0gb3MuZW52aXJvbi5nZXQoJ1RBUkdFVF9SRVBPJykKICAg
+ICAgICBzZWxmLmxvYWRfY29uZmlnKCkKICAgICAgICBzZWxmLnByb2Nlc3NlZF9pc3N1ZXMgPSBz
+ZWxmLmxvYWRfcHJvY2Vzc2VkX2lzc3VlcygpCiAgICAgICAgc2VsZi5sb2FkX3NhZmV0eV90cmFj
+a2luZygpCiAgICAKICAgIGRlZiBsb2FkX2NvbmZpZyhzZWxmKToKICAgICAgICAiIiJMb2FkIG1v
+bml0b3JpbmcgY29uZmlndXJhdGlvbiIiIgogICAgICAgIHdpdGggb3BlbignY29uZmlnLmpzb24n
+LCAncicpIGFzIGY6CiAgICAgICAgICAgIGNvbmZpZyA9IGpzb24ubG9hZChmKQogICAgICAgIAog
+ICAgICAgIHNlbGYubW9uaXRvcmVkX3JlcG9zID0gY29uZmlnLmdldCgnbW9uaXRvcmVkX3JlcG9z
+JywgW10pCiAgICAgICAgc2VsZi5rZXl3b3JkcyA9IGNvbmZpZy5nZXQoJ2tleXdvcmRzJywgW10p
+CiAgICAgICAgc2VsZi50b3BpY3MgPSBjb25maWcuZ2V0KCd0b3BpY3MnLCBbXSkKICAgICAgICAK
+ICAgICAgICBzZWxmLnRlYW1fYXNzaWdubWVudHMgPSBjb25maWcuZ2V0KCd0ZWFtX2Fzc2lnbm1l
+bnRzJywgewogICAgICAgICAgICAnd2FsbGV0JzogWydAYmFzaGJvYmJ5My1kcm9pZCddLAogICAg
+ICAgICAgICAnc2VjdXJpdHknOiBbJ0BiYXNoYm9iYnkzLWRyb2lkJ10sCiAgICAgICAgICAgICdi
+dWcnOiBbJ0BiYXNoYm9iYnkzLWRyb2lkJ10sCiAgICAgICAgICAgICd0cmFuc2FjdGlvbic6IFsn
+QGJhc2hib2JieTMtZHJvaWQnXSwKICAgICAgICAgICAgJ2NvbnRyYWN0JzogWydAYmFzaGJvYmJ5
+My1kcm9pZCddLAogICAgICAgICAgICAnZ2FzLWZlZSc6IFsnQGJhc2hib2JieTMtZHJvaWQnXSwK
+ICAgICAgICAgICAgJ2hlbHAnOiBbJ0BiYXNoYm9iYnkzLWRyb2lkJ10sCiAgICAgICAgICAgICdn
+ZW5lcmFsJzogWydAYmFzaGJvYmJ5My1kcm9pZCddCiAgICAgICAgfSkKICAgIAogICAgZGVmIGxv
+YWRfcHJvY2Vzc2VkX2lzc3VlcyhzZWxmKSAtPiBTZXRbc3RyXToKICAgICAgICAiIiJMb2FkIGxp
+c3Qgb2YgYWxyZWFkeSBwcm9jZXNzZWQgaXNzdWVzIiIiCiAgICAgICAgaWYgb3MucGF0aC5leGlz
+dHMoJ3Byb2Nlc3NlZF9pc3N1ZXMuanNvbicpOgogICAgICAgICAgICB3aXRoIG9wZW4oJ3Byb2Nl
+c3NlZF9pc3N1ZXMuanNvbicsICdyJykgYXMgZjoKICAgICAgICAgICAgICAgIGRhdGEgPSBqc29u
+LmxvYWQoZikKICAgICAgICAgICAgICAgIHJldHVybiBzZXQoZGF0YS5nZXQoJ2lzc3VlcycsIFtd
+KSkKICAgICAgICByZXR1cm4gc2V0KCkKICAgIAogICAgZGVmIHNhdmVfcHJvY2Vzc2VkX2lzc3Vl
+cyhzZWxmKToKICAgICAgICAiIiJTYXZlIHByb2Nlc3NlZCBpc3N1ZXMgdG8gZmlsZSIiIgogICAg
+ICAgIHdpdGggb3BlbigncHJvY2Vzc2VkX2lzc3Vlcy5qc29uJywgJ3cnKSBhcyBmOgogICAgICAg
+ICAgICBqc29uLmR1bXAoeydpc3N1ZXMnOiBsaXN0KHNlbGYucHJvY2Vzc2VkX2lzc3Vlcyl9LCBm
+LCBpbmRlbnQ9MikKICAgIAogICAgZGVmIGxvYWRfc2FmZXR5X3RyYWNraW5nKHNlbGYpOgogICAg
+ICAgICIiIkxvYWQgc2FmZXR5IHRyYWNraW5nIGRhdGEiIiIKICAgICAgICBzZWxmLnNhZmV0eV9m
+aWxlID0gJ3NhZmV0eV90cmFja2luZy5qc29uJwogICAgICAgIGlmIG9zLnBhdGguZXhpc3RzKHNl
+bGYuc2FmZXR5X2ZpbGUpOgogICAgICAgICAgICB3aXRoIG9wZW4oc2VsZi5zYWZldHlfZmlsZSwg
+J3InKSBhcyBmOgogICAgICAgICAgICAgICAgZGF0YSA9IGpzb24ubG9hZChmKQogICAgICAgICAg
+ICAgICAgc2VsZi5kYWlseV9pc3N1ZXNfY3JlYXRlZCA9IGRhdGEuZ2V0KCdkYWlseV9pc3N1ZXNf
+Y3JlYXRlZCcsIDApCiAgICAgICAgICAgICAgICBzZWxmLmxhc3RfcmVzZXRfZGF0ZSA9IGRhdGEu
+Z2V0KCdsYXN0X3Jlc2V0X2RhdGUnLCBkYXRldGltZS51dGNub3coKS5kYXRlKCkuaXNvZm9ybWF0
+KCkpCiAgICAgICAgICAgICAgICBzZWxmLnVzZXJfdGFnX2hpc3RvcnkgPSBkYXRhLmdldCgndXNl
+cl90YWdfaGlzdG9yeScsIHt9KQogICAgICAgIGVsc2U6CiAgICAgICAgICAgIHNlbGYuZGFpbHlf
+aXNzdWVzX2NyZWF0ZWQgPSAwCiAgICAgICAgICAgIHNlbGYubGFzdF9yZXNldF9kYXRlID0gZGF0
+ZXRpbWUudXRjbm93KCkuZGF0ZSgpLmlzb2Zvcm1hdCgpCiAgICAgICAgICAgIHNlbGYudXNlcl90
+YWdfaGlzdG9yeSA9IHt9CiAgICAgICAgCiAgICAgICAgdG9kYXkgPSBkYXRldGltZS51dGNub3co
+KS5kYXRlKCkuaXNvZm9ybWF0KCkKICAgICAgICBpZiBzZWxmLmxhc3RfcmVzZXRfZGF0ZSAhPSB0
+b2RheToKICAgICAgICAgICAgcHJpbnQoZiLwn5OFIE5ldyBkYXkgLSByZXNldHRpbmcgY291bnRl
+cnMiKQogICAgICAgICAgICBzZWxmLmRhaWx5X2lzc3Vlc19jcmVhdGVkID0gMAogICAgICAgICAg
+ICBzZWxmLmxhc3RfcmVzZXRfZGF0ZSA9IHRvZGF5CiAgICAgICAgICAgIHNlbGYudXNlcl90YWdf
+aGlzdG9yeSA9IHt9CiAgICAgICAgICAgIHNlbGYuc2F2ZV9zYWZldHlfdHJhY2tpbmcoKQogICAg
+CiAgICBkZWYgc2F2ZV9zYWZldHlfdHJhY2tpbmcoc2VsZik6CiAgICAgICAgIiIiU2F2ZSBzYWZl
+dHkgdHJhY2tpbmcgZGF0YSIiIgogICAgICAgIHdpdGggb3BlbihzZWxmLnNhZmV0eV9maWxlLCAn
+dycpIGFzIGY6CiAgICAgICAgICAgIGpzb24uZHVtcCh7CiAgICAgICAgICAgICAgICAnZGFpbHlf
+aXNzdWVzX2NyZWF0ZWQnOiBzZWxmLmRhaWx5X2lzc3Vlc19jcmVhdGVkLAogICAgICAgICAgICAg
+ICAgJ2xhc3RfcmVzZXRfZGF0ZSc6IHNlbGYubGFzdF9yZXNldF9kYXRlLAogICAgICAgICAgICAg
+ICAgJ3VzZXJfdGFnX2hpc3RvcnknOiBzZWxmLnVzZXJfdGFnX2hpc3RvcnkKICAgICAgICAgICAg
+fSwgZiwgaW5kZW50PTIpCiAgICAKICAgIGRlZiBpc19idXNpbmVzc19ob3VycyhzZWxmKSAtPiBi
+b29sOgogICAgICAgICIiIkNoZWNrIGlmIGN1cnJlbnQgdGltZSBpcyBidXNpbmVzcyBob3VycyAo
+OWFtLTVwbSBVVEMpIiIiCiAgICAgICAgY3VycmVudF9ob3VyID0gZGF0ZXRpbWUudXRjbm93KCku
+aG91cgogICAgICAgIHJldHVybiA5IDw9IGN1cnJlbnRfaG91ciA8IDE3CiAgICAKICAgIGRlZiBz
+aG91bGRfc2tpcF9ydW4oc2VsZikgLT4gYm9vbDoKICAgICAgICAiIiJSYW5kb21seSBza2lwIHJ1
+bnMgdG8gYXBwZWFyIG1vcmUgaHVtYW4gKDEwJSBjaGFuY2UpIiIiCiAgICAgICAgcmV0dXJuIHJh
+bmRvbS5yYW5kb20oKSA8IDAuMTAKICAgIAogICAgZGVmIGdldF9zbWFydF9wZXJfcnVuX2xpbWl0
+KHNlbGYpIC0+IGludDoKICAgICAgICAiIiJJbnRlbGxpZ2VudGx5IGRlY2lkZSBob3cgbWFueSBp
+c3N1ZXMgdG8gY3JlYXRlIHRoaXMgcnVuIiIiCiAgICAgICAgaWYgc2VsZi5pc19idXNpbmVzc19o
+b3VycygpOgogICAgICAgICAgICAjIEJ1c2luZXNzIGhvdXJzOiBtb3JlIGFnZ3Jlc3NpdmUgYnV0
+IHN0aWxsIHJhbmRvbQogICAgICAgICAgICByZXR1cm4gcmFuZG9tLmNob2ljZShbMSwgMiwgMl0p
+ICAjIDY2JSBjaGFuY2Ugb2YgMiwgMzMlIGNoYW5jZSBvZiAxCiAgICAgICAgZWxzZToKICAgICAg
+ICAgICAgIyBPZmYgaG91cnM6IG1vcmUgY29uc2VydmF0aXZlCiAgICAgICAgICAgIHJldHVybiBy
+YW5kb20uY2hvaWNlKFsxLCAxLCAyXSkgICMgNjYlIGNoYW5jZSBvZiAxLCAzMyUgY2hhbmNlIG9m
+IDIKICAgIAogICAgZGVmIGdldF9zbWFydF9kZWxheShzZWxmKSAtPiBpbnQ6CiAgICAgICAgIiIi
+R2V0IHZhcmlhYmxlIGRlbGF5IGJhc2VkIG9uIGNvbnRleHQiIiIKICAgICAgICBpZiBzZWxmLmlz
+X2J1c2luZXNzX2hvdXJzKCk6CiAgICAgICAgICAgICMgQnVzaW5lc3MgaG91cnM6IHNob3J0ZXIg
+ZGVsYXlzIChwZW9wbGUgYXJlIGFjdGl2ZSkKICAgICAgICAgICAgcmV0dXJuIHJhbmRvbS5yYW5k
+aW50KDMwLCA2MCkKICAgICAgICBlbHNlOgogICAgICAgICAgICAjIE9mZiBob3VyczogbG9uZ2Vy
+IGRlbGF5cyAobGVzcyBhY3Rpdml0eSkKICAgICAgICAgICAgcmV0dXJuIHJhbmRvbS5yYW5kaW50
+KDQ1LCA5MCkKICAgIAogICAgZGVmIHJhbmRvbV9kZWxheShzZWxmKToKICAgICAgICAiIiJBZGQg
+c21hcnQgZGVsYXkgdG8gc2ltdWxhdGUgaHVtYW4gYmVoYXZpb3IiIiIKICAgICAgICBkZWxheSA9
+IHNlbGYuZ2V0X3NtYXJ0X2RlbGF5KCkKICAgICAgICBwcmludChmIiAgIOKPsyBEZWxheToge2Rl
+bGF5fXMiKQogICAgICAgIHRpbWUuc2xlZXAoZGVsYXkpCiAgICAKICAgIGRlZiBjYW5fY3JlYXRl
+X2lzc3VlKHNlbGYpIC0+IGJvb2w6CiAgICAgICAgIiIiQ2hlY2sgaWYgd2UgY2FuIGNyZWF0ZSBt
+b3JlIGlzc3VlcyB0b2RheSIiIgogICAgICAgIE1BWF9EQUlMWV9JU1NVRVMgPSAxMAogICAgICAg
+IHJldHVybiBzZWxmLmRhaWx5X2lzc3Vlc19jcmVhdGVkIDwgTUFYX0RBSUxZX0lTU1VFUwogICAg
+CiAgICBkZWYgY2FuX3RhZ191c2VyKHNlbGYsIHVzZXJuYW1lOiBzdHIpIC0+IGJvb2w6CiAgICAg
+ICAgIiIiQ2hlY2sgaWYgd2UgY2FuIHRhZyB0aGlzIHVzZXIgKDIgaG91ciBjb29sZG93bikiIiIK
+ICAgICAgICBDT09MRE9XTl9IT1VSUyA9IDIKICAgICAgICBpZiB1c2VybmFtZSBub3QgaW4gc2Vs
+Zi51c2VyX3RhZ19oaXN0b3J5OgogICAgICAgICAgICByZXR1cm4gVHJ1ZQogICAgICAgIAogICAg
+ICAgIGxhc3RfdGFnZ2VkID0gZGF0ZXRpbWUuZnJvbWlzb2Zvcm1hdChzZWxmLnVzZXJfdGFnX2hp
+c3RvcnlbdXNlcm5hbWVdKQogICAgICAgIHRpbWVfc2luY2VfdGFnID0gZGF0ZXRpbWUudXRjbm93
+KCkgLSBsYXN0X3RhZ2dlZAogICAgICAgIAogICAgICAgIGlmIHRpbWVfc2luY2VfdGFnLnRvdGFs
+X3NlY29uZHMoKSA+PSAoQ09PTERPV05fSE9VUlMgKiAzNjAwKToKICAgICAgICAgICAgcmV0dXJu
+IFRydWUKICAgICAgICAKICAgICAgICBwcmludChmIiAgIOKPsCBDb29sZG93biBhY3RpdmUgZm9y
+IEB7dXNlcm5hbWV9IikKICAgICAgICByZXR1cm4gRmFsc2UKICAgIAogICAgZGVmIHJlY29yZF91
+c2VyX3RhZyhzZWxmLCB1c2VybmFtZTogc3RyKToKICAgICAgICAiIiJSZWNvcmQgdGhhdCB3ZSB0
+YWdnZWQgdGhpcyB1c2VyIiIiCiAgICAgICAgc2VsZi51c2VyX3RhZ19oaXN0b3J5W3VzZXJuYW1l
+XSA9IGRhdGV0aW1lLnV0Y25vdygpLmlzb2Zvcm1hdCgpCiAgICAgICAgc2VsZi5zYXZlX3NhZmV0
+eV90cmFja2luZygpCiAgICAKICAgIGRlZiBnZXRfbGFzdF9jaGVja190aW1lKHNlbGYpIC0+IHN0
+cjoKICAgICAgICAiIiJHZXQgdGltZXN0YW1wIG9mIGxhc3QgY2hlY2siIiIKICAgICAgICBsYXN0
+X2NoZWNrX2ZpbGUgPSAnbGFzdF9jaGVja190aW1lLmpzb24nCiAgICAgICAgaWYgb3MucGF0aC5l
+eGlzdHMobGFzdF9jaGVja19maWxlKToKICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAg
+d2l0aCBvcGVuKGxhc3RfY2hlY2tfZmlsZSwgJ3InKSBhcyBmOgogICAgICAgICAgICAgICAgICAg
+IGRhdGEgPSBqc29uLmxvYWQoZikKICAgICAgICAgICAgICAgICAgICBsYXN0X3RpbWUgPSBkYXRh
+LmdldCgnbGFzdF9jaGVja190aW1lJykKICAgICAgICAgICAgICAgICAgICBwcmludChmIvCfk4Ug
+RnJvbToge2xhc3RfdGltZX0iKQogICAgICAgICAgICAgICAgICAgIHJldHVybiBsYXN0X3RpbWUK
+ICAgICAgICAgICAgZXhjZXB0OgogICAgICAgICAgICAgICAgcGFzcwogICAgICAgIAogICAgICAg
+IHNpbmNlX3RpbWUgPSAoZGF0ZXRpbWUudXRjbm93KCkgLSB0aW1lZGVsdGEobWludXRlcz0zMCkp
+Lmlzb2Zvcm1hdCgpICsgJ1onCiAgICAgICAgcHJpbnQoZiLwn5OFIEZpcnN0IHJ1biAtIGxhc3Qg
+MzAgbWluIikKICAgICAgICByZXR1cm4gc2luY2VfdGltZQogICAgCiAgICBkZWYgc2F2ZV9sYXN0
+X2NoZWNrX3RpbWUoc2VsZik6CiAgICAgICAgIiIiU2F2ZSBjdXJyZW50IHRpbWUgYXMgbGFzdCBj
+aGVjayIiIgogICAgICAgIGN1cnJlbnRfdGltZSA9IGRhdGV0aW1lLnV0Y25vdygpLmlzb2Zvcm1h
+dCgpICsgJ1onCiAgICAgICAgd2l0aCBvcGVuKCdsYXN0X2NoZWNrX3RpbWUuanNvbicsICd3Jykg
+YXMgZjoKICAgICAgICAgICAganNvbi5kdW1wKHsnbGFzdF9jaGVja190aW1lJzogY3VycmVudF90
+aW1lfSwgZiwgaW5kZW50PTIpCiAgICAgICAgcHJpbnQoZiLwn5K+IENoZWNrcG9pbnQ6IHtjdXJy
+ZW50X3RpbWV9IikKICAgIAogICAgZGVmIGNoZWNrX3JhdGVfbGltaXQoc2VsZik6CiAgICAgICAg
+IiIiQ2hlY2sgR2l0SHViIEFQSSByYXRlIGxpbWl0IiIiCiAgICAgICAgcmVzcG9uc2UgPSByZXF1
+ZXN0cy5nZXQoJ2h0dHBzOi8vYXBpLmdpdGh1Yi5jb20vcmF0ZV9saW1pdCcsIGhlYWRlcnM9c2Vs
+Zi5oZWFkZXJzKQogICAgICAgIGlmIHJlc3BvbnNlLnN0YXR1c19jb2RlID09IDIwMDoKICAgICAg
+ICAgICAgZGF0YSA9IHJlc3BvbnNlLmpzb24oKQogICAgICAgICAgICByZW1haW5pbmcgPSBkYXRh
+WydyYXRlJ11bJ3JlbWFpbmluZyddCiAgICAgICAgICAgIHJlc2V0X3RpbWUgPSBkYXRldGltZS5m
+cm9tdGltZXN0YW1wKGRhdGFbJ3JhdGUnXVsncmVzZXQnXSkKICAgICAgICAgICAgcHJpbnQoZiLw
+n5OKIEFQSToge3JlbWFpbmluZ30gcmVxdWVzdHMgKHJlc2V0cyB7cmVzZXRfdGltZS5zdHJmdGlt
+ZSgnJUg6JU0nKX0pIikKICAgICAgICAgICAgcmV0dXJuIHJlbWFpbmluZwogICAgICAgIHJldHVy
+biAwCiAgICAKICAgIGRlZiBnZXRfcmVjZW50X2lzc3VlcyhzZWxmLCByZXBvOiBzdHIsIHNpbmNl
+X3RpbWU6IHN0cikgLT4gTGlzdFtEaWN0XToKICAgICAgICAiIiJHZXQgaXNzdWVzIGNyZWF0ZWQg
+YWZ0ZXIgbGFzdCBjaGVjayIiIgogICAgICAgIHVybCA9IGYnaHR0cHM6Ly9hcGkuZ2l0aHViLmNv
+bS9yZXBvcy97cmVwb30vaXNzdWVzJwogICAgICAgIHBhcmFtcyA9IHsKICAgICAgICAgICAgJ3N0
+YXRlJzogJ29wZW4nLAogICAgICAgICAgICAnc2luY2UnOiBzaW5jZV90aW1lLAogICAgICAgICAg
+ICAncGVyX3BhZ2UnOiAzMCwKICAgICAgICAgICAgJ3NvcnQnOiAnY3JlYXRlZCcsCiAgICAgICAg
+ICAgICdkaXJlY3Rpb24nOiAnZGVzYycKICAgICAgICB9CiAgICAgICAgCiAgICAgICAgdHJ5Ogog
+ICAgICAgICAgICByZXNwb25zZSA9IHJlcXVlc3RzLmdldCh1cmwsIGhlYWRlcnM9c2VsZi5oZWFk
+ZXJzLCBwYXJhbXM9cGFyYW1zLCB0aW1lb3V0PTEwKQogICAgICAgICAgICBpZiByZXNwb25zZS5z
+dGF0dXNfY29kZSA9PSAyMDA6CiAgICAgICAgICAgICAgICBpc3N1ZXMgPSByZXNwb25zZS5qc29u
+KCkKICAgICAgICAgICAgICAgIHJldHVybiBbaXNzdWUgZm9yIGlzc3VlIGluIGlzc3VlcyBpZiAn
+cHVsbF9yZXF1ZXN0JyBub3QgaW4gaXNzdWVdCiAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAg
+ICAgICByZXR1cm4gW10KICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgICAg
+IHJldHVybiBbXQogICAgCiAgICBkZWYgbWF0Y2hlc19jcml0ZXJpYShzZWxmLCBpc3N1ZTogRGlj
+dCkgLT4gYm9vbDoKICAgICAgICAiIiJDaGVjayBpZiBpc3N1ZSBtYXRjaGVzIGtleXdvcmRzIiIi
+CiAgICAgICAgdGl0bGUgPSBpc3N1ZS5nZXQoJ3RpdGxlJywgJycpLmxvd2VyKCkKICAgICAgICBi
+b2R5ID0gaXNzdWUuZ2V0KCdib2R5JywgJycpIG9yICcnCiAgICAgICAgYm9keSA9IGJvZHkubG93
+ZXIoKQogICAgICAgIGNvbnRlbnQgPSBmInt0aXRsZX0ge2JvZHl9IgogICAgICAgIAogICAgICAg
+IGZvciBrZXl3b3JkIGluIHNlbGYua2V5d29yZHM6CiAgICAgICAgICAgIGlmIGtleXdvcmQubG93
+ZXIoKSBpbiBjb250ZW50OgogICAgICAgICAgICAgICAgcmV0dXJuIFRydWUKICAgICAgICAKICAg
+ICAgICByZXR1cm4gRmFsc2UKICAgIAogICAgZGVmIGRldGVjdF9wcmlvcml0eShzZWxmLCBpc3N1
+ZTogRGljdCkgLT4gc3RyOgogICAgICAgICIiIkRldGVjdCBwcmlvcml0eSBsZXZlbCIiIgogICAg
+ICAgIHRpdGxlID0gaXNzdWUuZ2V0KCd0aXRsZScsICcnKS5sb3dlcigpCiAgICAgICAgYm9keSA9
+IChpc3N1ZS5nZXQoJ2JvZHknLCAnJykgb3IgJycpLmxvd2VyKCkKICAgICAgICBjb250ZW50ID0g
+ZiJ7dGl0bGV9IHtib2R5fSIKICAgICAgICAKICAgICAgICBpZiBhbnkod29yZCBpbiBjb250ZW50
+IGZvciB3b3JkIGluIFsnY3JpdGljYWwnLCAndXJnZW50JywgJ2VtZXJnZW5jeScsICdzZWN1cml0
+eSBicmVhY2gnLCAnZXhwbG9pdCcsICdoYWNrJywgJ2Z1bmRzIGF0IHJpc2snXSk6CiAgICAgICAg
+ICAgIHJldHVybiAncHJpb3JpdHktY3JpdGljYWwnCiAgICAgICAgZWxpZiBhbnkod29yZCBpbiBj
+b250ZW50IGZvciB3b3JkIGluIFsndXJnZW50JywgJ2FzYXAnLCAnaW1tZWRpYXRlbHknLCAnY2Fu
+dCBhY2Nlc3MnLCAnbG9ja2VkIG91dCcsICdsb3N0IGZ1bmRzJ10pOgogICAgICAgICAgICByZXR1
+cm4gJ3ByaW9yaXR5LXVyZ2VudCcKICAgICAgICBlbGlmIGFueSh3b3JkIGluIGNvbnRlbnQgZm9y
+IHdvcmQgaW4gWydoaWdoJywgJ2ltcG9ydGFudCcsICdzdHVjaycsICdmcm96ZW4nLCAnbWlzc2lu
+ZyBiYWxhbmNlJ10pOgogICAgICAgICAgICByZXR1cm4gJ3ByaW9yaXR5LWhpZ2gnCiAgICAgICAg
+ZWxpZiBhbnkod29yZCBpbiBjb250ZW50IGZvciB3b3JkIGluIFsnbWlub3InLCAnbG93JywgJ3N1
+Z2dlc3Rpb24nLCAnZW5oYW5jZW1lbnQnXSk6CiAgICAgICAgICAgIHJldHVybiAncHJpb3JpdHkt
+bG93JwogICAgICAgIGVsc2U6CiAgICAgICAgICAgIHJldHVybiAncHJpb3JpdHktbWVkaXVtJwog
+ICAgCiAgICBkZWYgc2ltaWxhcml0eShzZWxmLCB0ZXh0MTogc3RyLCB0ZXh0Mjogc3RyKSAtPiBm
+bG9hdDoKICAgICAgICAiIiJDYWxjdWxhdGUgc2ltaWxhcml0eSIiIgogICAgICAgIHJldHVybiBT
+ZXF1ZW5jZU1hdGNoZXIoTm9uZSwgdGV4dDEubG93ZXIoKSwgdGV4dDIubG93ZXIoKSkucmF0aW8o
+KQogICAgCiAgICBkZWYgY2hlY2tfZm9yX2R1cGxpY2F0ZXMoc2VsZiwgaXNzdWVfdGl0bGU6IHN0
+ciwgaXNzdWVfYm9keTogc3RyKSAtPiBMaXN0W0RpY3RdOgogICAgICAgICIiIkNoZWNrIGZvciBk
+dXBsaWNhdGVzIiIiCiAgICAgICAgdXJsID0gZidodHRwczovL2FwaS5naXRodWIuY29tL3JlcG9z
+L3tzZWxmLnRhcmdldF9yZXBvfS9pc3N1ZXMnCiAgICAgICAgcGFyYW1zID0geydzdGF0ZSc6ICdv
+cGVuJywgJ3Blcl9wYWdlJzogMTAsICdzb3J0JzogJ2NyZWF0ZWQnLCAnZGlyZWN0aW9uJzogJ2Rl
+c2MnfQogICAgICAgIAogICAgICAgIHRyeToKICAgICAgICAgICAgcmVzcG9uc2UgPSByZXF1ZXN0
+cy5nZXQodXJsLCBoZWFkZXJzPXNlbGYuaGVhZGVycywgcGFyYW1zPXBhcmFtcywgdGltZW91dD0x
+MCkKICAgICAgICAgICAgaWYgcmVzcG9uc2Uuc3RhdHVzX2NvZGUgPT0gMjAwOgogICAgICAgICAg
+ICAgICAgZXhpc3RpbmdfaXNzdWVzID0gcmVzcG9uc2UuanNvbigpCiAgICAgICAgICAgICAgICBk
+dXBsaWNhdGVzID0gW10KICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgZm9yIGV4aXN0
+aW5nIGluIGV4aXN0aW5nX2lzc3VlczoKICAgICAgICAgICAgICAgICAgICB0aXRsZV9zaW1pbGFy
+aXR5ID0gc2VsZi5zaW1pbGFyaXR5KGlzc3VlX3RpdGxlLCBleGlzdGluZ1sndGl0bGUnXSkKICAg
+ICAgICAgICAgICAgICAgICBpZiB0aXRsZV9zaW1pbGFyaXR5ID49IDAuNzoKICAgICAgICAgICAg
+ICAgICAgICAgICAgZHVwbGljYXRlcy5hcHBlbmQoewogICAgICAgICAgICAgICAgICAgICAgICAg
+ICAgJ251bWJlcic6IGV4aXN0aW5nWydudW1iZXInXSwKICAgICAgICAgICAgICAgICAgICAgICAg
+ICAgICd0aXRsZSc6IGV4aXN0aW5nWyd0aXRsZSddLAogICAgICAgICAgICAgICAgICAgICAgICAg
+ICAgJ3VybCc6IGV4aXN0aW5nWydodG1sX3VybCddLAogICAgICAgICAgICAgICAgICAgICAgICAg
+ICAgJ3NpbWlsYXJpdHknOiB0aXRsZV9zaW1pbGFyaXR5CiAgICAgICAgICAgICAgICAgICAgICAg
+IH0pCiAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgIHJldHVybiBkdXBsaWNhdGVzCiAg
+ICAgICAgICAgIHJldHVybiBbXQogICAgICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAg
+ICAgICAgcmV0dXJuIFtdCiAgICAKICAgIGRlZiBnZXRfYXNzaWduZWVfZm9yX2NhdGVnb3J5KHNl
+bGYsIGNhdGVnb3J5OiBzdHIpIC0+IHN0cjoKICAgICAgICAiIiJHZXQgYXNzaWduZWUiIiIKICAg
+ICAgICBhc3NpZ25lZXMgPSBzZWxmLnRlYW1fYXNzaWdubWVudHMuZ2V0KGNhdGVnb3J5LCBzZWxm
+LnRlYW1fYXNzaWdubWVudHMuZ2V0KCdnZW5lcmFsJywgW10pKQogICAgICAgIHJldHVybiBhc3Np
+Z25lZXNbMF0gaWYgYXNzaWduZWVzIGVsc2UgTm9uZQogICAgCiAgICBkZWYgZmluZF9yZWFsX2lz
+c3VlX293bmVyKHNlbGYsIGlzc3VlX2JvZHk6IHN0cikgLT4gT3B0aW9uYWxbc3RyXToKICAgICAg
+ICAiIiJGaW5kIHJlYWwgb3duZXIgZnJvbSBAbWVudGlvbnMiIiIKICAgICAgICBpZiBub3QgaXNz
+dWVfYm9keToKICAgICAgICAgICAgcmV0dXJuIE5vbmUKICAgICAgICAKICAgICAgICBtZW50aW9u
+cyA9IHJlLmZpbmRhbGwocidAKFthLXpBLVowLTlfLV0rKScsIGlzc3VlX2JvZHkpCiAgICAgICAg
+CiAgICAgICAgaWYgbWVudGlvbnM6CiAgICAgICAgICAgIHJlYWxfb3duZXIgPSBtZW50aW9uc1sw
+XQogICAgICAgICAgICBwcmludChmIiAgIPCflI0gT3duZXI6IEB7cmVhbF9vd25lcn0iKQogICAg
+ICAgICAgICByZXR1cm4gcmVhbF9vd25lcgogICAgICAgIAogICAgICAgIHJldHVybiBOb25lCiAg
+ICAKICAgIGRlZiBnZXRfb3JpZ2luYWxfaXNzdWVfb3duZXIoc2VsZiwgaXNzdWVfdXJsOiBzdHIp
+IC0+IE9wdGlvbmFsW3N0cl06CiAgICAgICAgIiIiRmV0Y2ggb3JpZ2luYWwgaXNzdWUgb3duZXIi
+IiIKICAgICAgICBtYXRjaCA9IHJlLnNlYXJjaChyJ2dpdGh1YlwuY29tLyhbXi9dKykvKFteL10r
+KS9pc3N1ZXMvKFxkKyknLCBpc3N1ZV91cmwpCiAgICAgICAgaWYgbm90IG1hdGNoOgogICAgICAg
+ICAgICByZXR1cm4gTm9uZQogICAgICAgIAogICAgICAgIG93bmVyLCByZXBvLCBpc3N1ZV9udW0g
+PSBtYXRjaC5ncm91cHMoKQogICAgICAgIG9yaWdpbmFsX3JlcG8gPSBmIntvd25lcn0ve3JlcG99
+IgogICAgICAgIAogICAgICAgIHVybCA9IGYnaHR0cHM6Ly9hcGkuZ2l0aHViLmNvbS9yZXBvcy97
+b3JpZ2luYWxfcmVwb30vaXNzdWVzL3tpc3N1ZV9udW19JwogICAgICAgIAogICAgICAgIHRyeToK
+ICAgICAgICAgICAgcmVzcG9uc2UgPSByZXF1ZXN0cy5nZXQodXJsLCBoZWFkZXJzPXNlbGYuaGVh
+ZGVycywgdGltZW91dD0xMCkKICAgICAgICAgICAgaWYgcmVzcG9uc2Uuc3RhdHVzX2NvZGUgPT0g
+MjAwOgogICAgICAgICAgICAgICAgb3JpZ2luYWxfaXNzdWUgPSByZXNwb25zZS5qc29uKCkKICAg
+ICAgICAgICAgICAgIHJlYWxfb3duZXIgPSBvcmlnaW5hbF9pc3N1ZVsndXNlciddWydsb2dpbidd
+CiAgICAgICAgICAgICAgICBwcmludChmIiAgIPCfjq8gUmVhbCBvd25lcjogQHtyZWFsX293bmVy
+fSIpCiAgICAgICAgICAgICAgICByZXR1cm4gcmVhbF9vd25lcgogICAgICAgICAgICByZXR1cm4g
+Tm9uZQogICAgICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICAgICAgcmV0dXJuIE5v
+bmUKICAgIAogICAgZGVmIGZpbmRfcmVhbF9vd25lcihzZWxmLCBpc3N1ZTogRGljdCkgLT4gc3Ry
+OgogICAgICAgICIiIkZpbmQgdGhlIHJlYWwgb3duZXIiIiIKICAgICAgICBpc3N1ZV9ib2R5ID0g
+aXNzdWUuZ2V0KCdib2R5JywgJycpIG9yICcnCiAgICAgICAgCiAgICAgICAgZ2l0aHViX2xpbmtz
+ID0gcmUuZmluZGFsbChyJ2h0dHBzOi8vZ2l0aHViXC5jb20vW14vXSsvW14vXSsvaXNzdWVzL1xk
+KycsIGlzc3VlX2JvZHkpCiAgICAgICAgaWYgZ2l0aHViX2xpbmtzOgogICAgICAgICAgICByZWFs
+X293bmVyID0gc2VsZi5nZXRfb3JpZ2luYWxfaXNzdWVfb3duZXIoZ2l0aHViX2xpbmtzWzBdKQog
+ICAgICAgICAgICBpZiByZWFsX293bmVyOgogICAgICAgICAgICAgICAgcmV0dXJuIHJlYWxfb3du
+ZXIKICAgICAgICAKICAgICAgICByZWFsX293bmVyID0gc2VsZi5maW5kX3JlYWxfaXNzdWVfb3du
+ZXIoaXNzdWVfYm9keSkKICAgICAgICBpZiByZWFsX293bmVyOgogICAgICAgICAgICByZXR1cm4g
+cmVhbF9vd25lcgogICAgICAgIAogICAgICAgIHJldHVybiBpc3N1ZVsndXNlciddWydsb2dpbidd
+CiAgICAKICAgIGRlZiBjcmVhdGVfaXNzdWVfaW5fdGFyZ2V0X3JlcG8oc2VsZiwgb3JpZ2luYWxf
+aXNzdWU6IERpY3QsIHNvdXJjZV9yZXBvOiBzdHIpOgogICAgICAgICIiIkNyZWF0ZSBpc3N1ZSB3
+aXRoIEBtZW50aW9uIGluIGJvZHkiIiIKICAgICAgICB1cmwgPSBmJ2h0dHBzOi8vYXBpLmdpdGh1
+Yi5jb20vcmVwb3Mve3NlbGYudGFyZ2V0X3JlcG99L2lzc3VlcycKICAgICAgICAKICAgICAgICBv
+cmlnaW5hbF9ib2R5ID0gb3JpZ2luYWxfaXNzdWUuZ2V0KCdib2R5JywgJycpIG9yICcqTm8gZGVz
+Y3JpcHRpb24gcHJvdmlkZWQqJwogICAgICAgIHNvdXJjZV91c2VyID0gb3JpZ2luYWxfaXNzdWVb
+J3VzZXInXVsnbG9naW4nXQogICAgICAgIGlzc3VlX3RpdGxlID0gb3JpZ2luYWxfaXNzdWVbJ3Rp
+dGxlJ10KICAgICAgICAKICAgICAgICByZWFsX293bmVyID0gc2VsZi5maW5kX3JlYWxfb3duZXIo
+b3JpZ2luYWxfaXNzdWUpCiAgICAgICAgcHJpb3JpdHlfbGFiZWwgPSBzZWxmLmRldGVjdF9wcmlv
+cml0eShvcmlnaW5hbF9pc3N1ZSkKICAgICAgICBwcmludChmIiAgIPCfjq8gUHJpb3JpdHk6IHtw
+cmlvcml0eV9sYWJlbH0iKQogICAgICAgIAogICAgICAgIGluY2x1ZGVfbWVudGlvbiA9IHNlbGYu
+Y2FuX3RhZ191c2VyKHJlYWxfb3duZXIpCiAgICAgICAgaWYgaW5jbHVkZV9tZW50aW9uOgogICAg
+ICAgICAgICBzZWxmLnJlY29yZF91c2VyX3RhZyhyZWFsX293bmVyKQogICAgICAgICAgICBtZW50
+aW9uX2xpbmUgPSBmIioqSGVsbG8qKiBAe3JlYWxfb3duZXJ9IgogICAgICAgICAgICBwcmludChm
+IiAgIPCflJQgTm90aWZ5aW5nIEB7cmVhbF9vd25lcn0iKQogICAgICAgIGVsc2U6CiAgICAgICAg
+ICAgIG1lbnRpb25fbGluZSA9IGYiKipVc2VyOioqIHtyZWFsX293bmVyfSIKICAgICAgICAKICAg
+ICAgICBkdXBsaWNhdGVzID0gc2VsZi5jaGVja19mb3JfZHVwbGljYXRlcyhpc3N1ZV90aXRsZSwg
+b3JpZ2luYWxfYm9keSkKICAgICAgICBkdXBsaWNhdGVfc2VjdGlvbiA9ICIiCiAgICAgICAgaWYg
+ZHVwbGljYXRlczoKICAgICAgICAgICAgcHJpbnQoZiIgICDwn5SNIHtsZW4oZHVwbGljYXRlcyl9
+IHNpbWlsYXIgZm91bmQiKQogICAgICAgICAgICBkdXBsaWNhdGVfc2VjdGlvbiA9ICJcblxuIyMg
+4pqg77iPIFBvc3NpYmxlIER1cGxpY2F0ZXNcblxuIgogICAgICAgICAgICBmb3IgZHVwIGluIGR1
+cGxpY2F0ZXNbOjNdOgogICAgICAgICAgICAgICAgZHVwbGljYXRlX3NlY3Rpb24gKz0gZiItICN7
+ZHVwWydudW1iZXInXX06IFt7ZHVwWyd0aXRsZSddfV0oe2R1cFsndXJsJ119KSAoe2R1cFsnc2lt
+aWxhcml0eSddOi4wJX0pXG4iCiAgICAgICAgCiAgICAgICAgbmV3X2JvZHkgPSBmIiIiIyMg8J+T
+iyBTdXBwb3J0IENhc2UgZnJvbSBAe3JlYWxfb3duZXJ9Cgp7bWVudGlvbl9saW5lfQoKfCBGaWVs
+ZCB8IERldGFpbHMgfAp8LS0tLS0tLXwtLS0tLS0tLS18CnwgKipTb3VyY2UqKiB8IHtzb3VyY2Vf
+cmVwb30gfAp8ICoqQ2FzZSBSZWYqKiB8ICN7b3JpZ2luYWxfaXNzdWVbJ251bWJlciddfSB8Cnwg
+KipSZXBvcnRlcioqIHwgQHtzb3VyY2VfdXNlcn0gfAp8ICoqUHJpb3JpdHkqKiB8IHtwcmlvcml0
+eV9sYWJlbH0gfAp8ICoqU3RhdHVzKiogfCDwn5+hIFVuZGVyIFJldmlldyB8CgotLS0KCiMjIyDw
+n5OdIElzc3VlIERlc2NyaXB0aW9uOgoKe29yaWdpbmFsX2JvZHl9CntkdXBsaWNhdGVfc2VjdGlv
+bn0KCi0tLQoKIyMjIPCfk54gT2ZmaWNpYWwgU3VwcG9ydDoKLSBbU3VwcG9ydCBQb3J0YWxdKGh0
+dHBzOi8vZ2l0ZGFwcHMtYXV0aC53ZWIuYXBwKQotIEVtYWlsOiBHaXRfcmVzcG9uc2VAcHJvdG9u
+Lm1lCgotLS0KCj4gKkxvZ2dlZCBieSBHaXREYXBwcyBTdXBwb3J0IEluZnJhc3RydWN0dXJlKgoi
+IiIKICAgICAgICAKICAgICAgICBsYWJlbHMgPSBbJ2F1dG8tZGV0ZWN0ZWQnLCBwcmlvcml0eV9s
+YWJlbF0KICAgICAgICAKICAgICAgICB0aXRsZV9sb3dlciA9IGlzc3VlX3RpdGxlLmxvd2VyKCkK
+ICAgICAgICBib2R5X2xvd2VyID0gb3JpZ2luYWxfYm9keS5sb3dlcigpCiAgICAgICAgY29udGVu
+dCA9IGYie3RpdGxlX2xvd2VyfSB7Ym9keV9sb3dlcn0iCiAgICAgICAgCiAgICAgICAgY2F0ZWdv
+cnkgPSAnZ2VuZXJhbCcKICAgICAgICBpZiBhbnkod29yZCBpbiBjb250ZW50IGZvciB3b3JkIGlu
+IFsnc2VjdXJpdHknLCAndnVsbmVyYWJpbGl0eScsICdleHBsb2l0JywgJ2hhY2snXSk6CiAgICAg
+ICAgICAgIGNhdGVnb3J5ID0gJ3NlY3VyaXR5JwogICAgICAgIGVsaWYgYW55KHdvcmQgaW4gY29u
+dGVudCBmb3Igd29yZCBpbiBbJ3dhbGxldCcsICdiYWxhbmNlJywgJ2FjY291bnQnLCAncHJpdmF0
+ZSBrZXknLCAnc2VlZCBwaHJhc2UnLCAnbWV0YW1hc2snLCAnbGVkZ2VyJywgJ3RyZXpvciddKToK
+ICAgICAgICAgICAgY2F0ZWdvcnkgPSAnd2FsbGV0JwogICAgICAgIGVsaWYgYW55KHdvcmQgaW4g
+Y29udGVudCBmb3Igd29yZCBpbiBbJ3RyYW5zYWN0aW9uJywgJ3N3YXAnLCAndHJhbnNmZXInLCAn
+dHgnXSk6CiAgICAgICAgICAgIGNhdGVnb3J5ID0gJ3RyYW5zYWN0aW9uJwogICAgICAgIGVsaWYg
+YW55KHdvcmQgaW4gY29udGVudCBmb3Igd29yZCBpbiBbJ2NvbnRyYWN0JywgJ3NtYXJ0IGNvbnRy
+YWN0JywgJ3NvbGlkaXR5J10pOgogICAgICAgICAgICBjYXRlZ29yeSA9ICdjb250cmFjdCcKICAg
+ICAgICBlbGlmIGFueSh3b3JkIGluIGNvbnRlbnQgZm9yIHdvcmQgaW4gWydnYXMnLCAnZmVlJ10p
+OgogICAgICAgICAgICBjYXRlZ29yeSA9ICdnYXMtZmVlJwogICAgICAgIAogICAgICAgIGxhYmVs
+cy5hcHBlbmQoY2F0ZWdvcnkpCiAgICAgICAgbGFiZWxzLmFwcGVuZChmJ3NvdXJjZTp7c291cmNl
+X3JlcG8uc3BsaXQoIi8iKVswXX0nKQogICAgICAgIAogICAgICAgIGlmIGR1cGxpY2F0ZXM6CiAg
+ICAgICAgICAgIGxhYmVscy5hcHBlbmQoJ3Bvc3NpYmxlLWR1cGxpY2F0ZScpCiAgICAgICAgCiAg
+ICAgICAgYXNzaWduZWUgPSBzZWxmLmdldF9hc3NpZ25lZV9mb3JfY2F0ZWdvcnkoY2F0ZWdvcnkp
+CiAgICAgICAgcHJpbnQoZiIgICDwn5GkIEFzc2lnbmVkOiB7YXNzaWduZWV9IikKICAgICAgICAK
+ICAgICAgICBwYXlsb2FkID0geyd0aXRsZSc6IGYiW0FVVE9dIHtpc3N1ZV90aXRsZX0iLCAnYm9k
+eSc6IG5ld19ib2R5LCAnbGFiZWxzJzogbGFiZWxzfQogICAgICAgIAogICAgICAgIGlmIGFzc2ln
+bmVlIGFuZCBhc3NpZ25lZS5zdGFydHN3aXRoKCdAJyk6CiAgICAgICAgICAgIHBheWxvYWRbJ2Fz
+c2lnbmVlcyddID0gW2Fzc2lnbmVlWzE6XV0KICAgICAgICAKICAgICAgICB0cnk6CiAgICAgICAg
+ICAgIHNlbGYucmFuZG9tX2RlbGF5KCkKICAgICAgICAgICAgCiAgICAgICAgICAgIHJlc3BvbnNl
+ID0gcmVxdWVzdHMucG9zdCh1cmwsIGhlYWRlcnM9c2VsZi5oZWFkZXJzLCBqc29uPXBheWxvYWQs
+IHRpbWVvdXQ9MTApCiAgICAgICAgICAgIGlmIHJlc3BvbnNlLnN0YXR1c19jb2RlID09IDIwMToK
+ICAgICAgICAgICAgICAgIG5ld19pc3N1ZSA9IHJlc3BvbnNlLmpzb24oKQogICAgICAgICAgICAg
+ICAgcHJpbnQoZiLinIUgQ3JlYXRlZCAje25ld19pc3N1ZVsnbnVtYmVyJ119OiB7aXNzdWVfdGl0
+bGVbOjQwXX0uLi4iKQogICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICBzZWxmLmRhaWx5
+X2lzc3Vlc19jcmVhdGVkICs9IDEKICAgICAgICAgICAgICAgIHNlbGYuc2F2ZV9zYWZldHlfdHJh
+Y2tpbmcoKQogICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICByZXR1cm4geydpc3N1ZSc6
+IG5ld19pc3N1ZSwgJ3JlYWxfb3duZXInOiByZWFsX293bmVyfQogICAgICAgICAgICBlbHNlOgog
+ICAgICAgICAgICAgICAgcHJpbnQoZiLimqDvuI8gRmFpbGVkOiB7cmVzcG9uc2Uuc3RhdHVzX2Nv
+ZGV9IikKICAgICAgICAgICAgICAgIHJldHVybiBOb25lCiAgICAgICAgZXhjZXB0IEV4Y2VwdGlv
+biBhcyBlOgogICAgICAgICAgICBwcmludChmIuKaoO+4jyBFcnJvcjoge3N0cihlKX0iKQogICAg
+ICAgICAgICByZXR1cm4gTm9uZQogICAgCiAgICBkZWYgbW9uaXRvcl9yZXBvc2l0b3JpZXMoc2Vs
+Zik6CiAgICAgICAgIiIiTWFpbiBtb25pdG9yaW5nIHdpdGggc21hcnQgYmVoYXZpb3IiIiIKICAg
+ICAgICBwcmludChmIlxueyc9Jyo2MH0iKQogICAgICAgIHByaW50KGYi8J+agCBTbWFydCBDcnlw
+dG8gTW9uaXRvciIpCiAgICAgICAgcHJpbnQoZiJ7Jz0nKjYwfVxuIikKICAgICAgICAKICAgICAg
+ICAjIFNtYXJ0IHNraXAgLSByYW5kb21seSBza2lwIGVudGlyZSBydW4gdG8gYXBwZWFyIG1vcmUg
+aHVtYW4KICAgICAgICBpZiBzZWxmLnNob3VsZF9za2lwX3J1bigpOgogICAgICAgICAgICBwcmlu
+dCgi8J+SpCBTa2lwcGluZyB0aGlzIHJ1biAocmFuZG9tIGh1bWFuIGJlaGF2aW9yKSIpCiAgICAg
+ICAgICAgIHByaW50KCLinIUgRG9uZVxuIikKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAg
+ICAgICAgcmVtYWluaW5nID0gc2VsZi5jaGVja19yYXRlX2xpbWl0KCkKICAgICAgICBpZiByZW1h
+aW5pbmcgPCAxMDA6CiAgICAgICAgICAgIHByaW50KCLimqDvuI8gTG93IEFQSSBsaW1pdCIpCiAg
+ICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIGlmIG5vdCBzZWxmLmNhbl9jcmVhdGVf
+aXNzdWUoKToKICAgICAgICAgICAgcHJpbnQoZiLimqDvuI8gRGFpbHkgbGltaXQgcmVhY2hlZCAo
+e3NlbGYuZGFpbHlfaXNzdWVzX2NyZWF0ZWR9LzEwKSIpCiAgICAgICAgICAgIHNlbGYuc2F2ZV9s
+YXN0X2NoZWNrX3RpbWUoKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICAjIFNt
+YXJ0IHBlci1ydW4gbGltaXQgYmFzZWQgb24gYnVzaW5lc3MgaG91cnMKICAgICAgICBNQVhfSVNT
+VUVTX1RISVNfUlVOID0gc2VsZi5nZXRfc21hcnRfcGVyX3J1bl9saW1pdCgpCiAgICAgICAgCiAg
+ICAgICAgYnVzaW5lc3NfaG91cnMgPSAiQnVzaW5lc3MgaG91cnMiIGlmIHNlbGYuaXNfYnVzaW5l
+c3NfaG91cnMoKSBlbHNlICJPZmYgaG91cnMiCiAgICAgICAgcHJpbnQoZiLij7Age2J1c2luZXNz
+X2hvdXJzfSB8IERhaWx5OiB7c2VsZi5kYWlseV9pc3N1ZXNfY3JlYXRlZH0vMTAgfCBUaGlzIHJ1
+bjogMC97TUFYX0lTU1VFU19USElTX1JVTn0iKQogICAgICAgIAogICAgICAgIHNpbmNlX3RpbWUg
+PSBzZWxmLmdldF9sYXN0X2NoZWNrX3RpbWUoKQogICAgICAgIAogICAgICAgIHRvdGFsX2lzc3Vl
+c19mb3VuZCA9IDAKICAgICAgICB0b3RhbF9pc3N1ZXNfY3JlYXRlZCA9IDAKICAgICAgICAKICAg
+ICAgICBmb3IgcmVwbyBpbiBzZWxmLm1vbml0b3JlZF9yZXBvczoKICAgICAgICAgICAgaWYgbm90
+IHNlbGYuY2FuX2NyZWF0ZV9pc3N1ZSgpOgogICAgICAgICAgICAgICAgcHJpbnQoZiJcbuKaoO+4
+jyBEYWlseSBsaW1pdCByZWFjaGVkIikKICAgICAgICAgICAgICAgIGJyZWFrCiAgICAgICAgICAg
+IAogICAgICAgICAgICBpZiB0b3RhbF9pc3N1ZXNfY3JlYXRlZCA+PSBNQVhfSVNTVUVTX1RISVNf
+UlVOOgogICAgICAgICAgICAgICAgcHJpbnQoZiJcbuKaoO+4jyBSdW4gbGltaXQgcmVhY2hlZCAo
+e01BWF9JU1NVRVNfVEhJU19SVU59KSIpCiAgICAgICAgICAgICAgICBicmVhawogICAgICAgICAg
+ICAKICAgICAgICAgICAgcHJpbnQoZiJcbvCfk4Ige3JlcG99IikKICAgICAgICAgICAgCiAgICAg
+ICAgICAgIGlzc3VlcyA9IHNlbGYuZ2V0X3JlY2VudF9pc3N1ZXMocmVwbywgc2luY2VfdGltZSkK
+ICAgICAgICAgICAgCiAgICAgICAgICAgIGlmIG5vdCBpc3N1ZXM6CiAgICAgICAgICAgICAgICBw
+cmludChmIiAgIE5vIG5ldyBpc3N1ZXMiKQogICAgICAgICAgICAgICAgY29udGludWUKICAgICAg
+ICAgICAgCiAgICAgICAgICAgIHByaW50KGYiICAge2xlbihpc3N1ZXMpfSBuZXcgaXNzdWUocyki
+KQogICAgICAgICAgICAKICAgICAgICAgICAgZm9yIGlzc3VlIGluIGlzc3VlczoKICAgICAgICAg
+ICAgICAgIGlzc3VlX2lkID0gZiJ7cmVwb30je2lzc3VlWydudW1iZXInXX0iCiAgICAgICAgICAg
+ICAgICAKICAgICAgICAgICAgICAgIGlmIGlzc3VlX2lkIGluIHNlbGYucHJvY2Vzc2VkX2lzc3Vl
+czoKICAgICAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICAgICAgCiAgICAgICAg
+ICAgICAgICBpZiBzZWxmLm1hdGNoZXNfY3JpdGVyaWEoaXNzdWUpOgogICAgICAgICAgICAgICAg
+ICAgIHRvdGFsX2lzc3Vlc19mb3VuZCArPSAxCiAgICAgICAgICAgICAgICAgICAgcHJpbnQoZiIg
+ICDinKggTWF0Y2g6ICN7aXNzdWVbJ251bWJlciddfSAtIHtpc3N1ZVsndGl0bGUnXVs6MzVdfSIp
+CiAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgIyBTbWFydCBkZWNpc2lv
+bjogc29tZXRpbWVzIHNraXAgZXZlbiB3aGVuIGZvdW5kICgxMCUgY2hhbmNlKQogICAgICAgICAg
+ICAgICAgICAgIGlmIHJhbmRvbS5yYW5kb20oKSA8IDAuMTA6CiAgICAgICAgICAgICAgICAgICAg
+ICAgIHByaW50KGYiICAg8J+SrSBTa2lwcGluZyAocmFuZG9tIGNob2ljZSkiKQogICAgICAgICAg
+ICAgICAgICAgICAgICBzZWxmLnByb2Nlc3NlZF9pc3N1ZXMuYWRkKGlzc3VlX2lkKQogICAgICAg
+ICAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICAgICAgICAgIAogICAgICAgICAg
+ICAgICAgICAgIGlmIHRvdGFsX2lzc3Vlc19jcmVhdGVkID49IE1BWF9JU1NVRVNfVEhJU19SVU46
+CiAgICAgICAgICAgICAgICAgICAgICAgIHByaW50KGYiICAg4pqg77iPIFJ1biBsaW1pdCByZWFj
+aGVkIikKICAgICAgICAgICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICAgICAgICAgICAgICAK
+ICAgICAgICAgICAgICAgICAgICBpZiBub3Qgc2VsZi5jYW5fY3JlYXRlX2lzc3VlKCk6CiAgICAg
+ICAgICAgICAgICAgICAgICAgIHByaW50KGYiICAg4pqg77iPIERhaWx5IGxpbWl0IHJlYWNoZWQi
+KQogICAgICAgICAgICAgICAgICAgICAgICBicmVhawogICAgICAgICAgICAgICAgICAgIAogICAg
+ICAgICAgICAgICAgICAgIGNyZWF0ZWQgPSBzZWxmLmNyZWF0ZV9pc3N1ZV9pbl90YXJnZXRfcmVw
+byhpc3N1ZSwgcmVwbykKICAgICAgICAgICAgICAgICAgICBpZiBjcmVhdGVkOgogICAgICAgICAg
+ICAgICAgICAgICAgICB0b3RhbF9pc3N1ZXNfY3JlYXRlZCArPSAxCiAgICAgICAgICAgICAgICAg
+ICAgICAgIHNlbGYucHJvY2Vzc2VkX2lzc3Vlcy5hZGQoaXNzdWVfaWQpCiAgICAgICAgICAgICAg
+ICBlbHNlOgogICAgICAgICAgICAgICAgICAgIHNlbGYucHJvY2Vzc2VkX2lzc3Vlcy5hZGQoaXNz
+dWVfaWQpCiAgICAgICAgICAgIAogICAgICAgICAgICBpZiB0b3RhbF9pc3N1ZXNfY3JlYXRlZCA+
+PSBNQVhfSVNTVUVTX1RISVNfUlVOIG9yIG5vdCBzZWxmLmNhbl9jcmVhdGVfaXNzdWUoKToKICAg
+ICAgICAgICAgICAgIGJyZWFrCiAgICAgICAgCiAgICAgICAgc2VsZi5zYXZlX3Byb2Nlc3NlZF9p
+c3N1ZXMoKQogICAgICAgIHNlbGYuc2F2ZV9sYXN0X2NoZWNrX3RpbWUoKQogICAgICAgIAogICAg
+ICAgIHByaW50KGYiXG57Jz0nKjYwfSIpCiAgICAgICAgcHJpbnQoZiLwn5OKIFN1bW1hcnk6IikK
+ICAgICAgICBwcmludChmIiAgIC0gRm91bmQ6IHt0b3RhbF9pc3N1ZXNfZm91bmR9IikKICAgICAg
+ICBwcmludChmIiAgIC0gQ3JlYXRlZDoge3RvdGFsX2lzc3Vlc19jcmVhdGVkfS97TUFYX0lTU1VF
+U19USElTX1JVTn0iKQogICAgICAgIHByaW50KGYiICAgLSBEYWlseToge3NlbGYuZGFpbHlfaXNz
+dWVzX2NyZWF0ZWR9LzEwIikKICAgICAgICBwcmludChmInsnPScqNjB9XG4iKQoKZGVmIG1haW4o
+KToKICAgICIiIk1haW4gZW50cnkiIiIKICAgIHRyeToKICAgICAgICBtb25pdG9yID0gQ3J5cHRv
+SXNzdWVNb25pdG9yKCkKICAgICAgICBtb25pdG9yLm1vbml0b3JfcmVwb3NpdG9yaWVzKCkKICAg
+ICAgICBwcmludCgi4pyFIERvbmVcbiIpCiAgICAgICAgCiAgICBleGNlcHQgRXhjZXB0aW9uIGFz
+IGU6CiAgICAgICAgcHJpbnQoZiLinYwgRXJyb3I6IHtzdHIoZSl9IikKICAgICAgICByYWlzZQoK
+aWYgX19uYW1lX18gPT0gJ19fbWFpbl9fJzoKICAgIG1haW4oKQo=

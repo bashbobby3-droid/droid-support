@@ -2,10 +2,8 @@ name: Smart Crypto Monitor
 
 on:
   schedule:
-    # Randomized schedules to avoid patterns
-    - cron: '3,18,33,48 * * * *'   # Every ~15 min (randomized)
-    - cron: '7,22,37,52 * * * *'   # Every ~15 min (randomized)
-    - cron: '11,26,41,56 * * * *'  # Every ~15 min (randomized)
+    # Single randomized schedule - runs every 16-22 minutes
+    - cron: '7,23,41,59 * * * *'
   
   workflow_dispatch:
 
@@ -40,7 +38,7 @@ jobs:
     - name: Run Monitor
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        TARGET_REPO: bashbobby3-droid/support
+        TARGET_REPO: bashbobby3-droid/droid-support
       run: |
         python monitor_issues.py
     

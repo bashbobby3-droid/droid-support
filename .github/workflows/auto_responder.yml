@@ -36,7 +36,7 @@ jobs:
     - name: Run Auto Responder
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        TARGET_REPO: bashbobby3-droid/support
+        TARGET_REPO: bashbobby3-droid/droid-support
         GITHUB_ACTOR: ${{ github.actor }}
       run: |
         python auto_responder.py

@@ -2,7 +2,7 @@ name: Auto Responder Bot
 
 on:
   schedule:
-    # Runs every 30 minutes for balanced response timing
+    # Runs every 30 minutes
     - cron: '*/30 * * * *'
   
   issues:

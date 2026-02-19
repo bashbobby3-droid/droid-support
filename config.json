@@ -16,7 +16,7 @@
     "LedgerHQ/ledger-live",
     "sushiswap/sushiswap",
     "curvefi/curve-contract",
-    "balancer/balancer-v2-monorepo",
+    "balancer/balancer-v2-monorepo"
   ],
   "keywords": [
     "wallet",

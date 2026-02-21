@@ -47,7 +47,7 @@ This Code of Conduct applies within all community spaces — including the GitHu
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project maintainers at:
 
-**📧 [Open a private issue or contact via GitHub](https://github.com/bashbobby3-droid/droid-project)**
+**📧 [Open a private issue or contact via GitHub](https://github.com/bashbobby3-droid/droid-support/issues)**
 
 All complaints will be reviewed and investigated promptly and fairly. All community leaders are obligated to respect the privacy and security of the reporter of any incident.
 

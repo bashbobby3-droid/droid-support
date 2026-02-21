@@ -2,8 +2,8 @@ name: Auto Responder Bot
 
 on:
   schedule:
-    # Runs every 30 minutes
-    - cron: '*/30 * * * *'
+    # Runs every 5 minutes for faster response time
+    - cron: '*/5 * * * *'
   
   issues:
     types: [opened, labeled]

@@ -88,4 +88,4 @@ We follow a **coordinated disclosure** model. We ask that:
 
 ---
 
-*Thank you for being a responsible security researcher and helping make droid-project safer for everyone.* 💙
+*Thank you for being a responsible security researcher and helping make droid-support and project safer for everyone.* 💙

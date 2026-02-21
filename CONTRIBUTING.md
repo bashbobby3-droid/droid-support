@@ -154,7 +154,7 @@ We follow standard Python conventions to keep the codebase consistent and readab
 
 Stuck? That's totally okay — we've all been there.
 
-- Open an [issue](https://github.com/bashbobby3-droid/droid-project/issues) and tag it `question`
+- Open an [issue](https://github.com/bashbobby3-droid/droid-support/issues) and tag it `question`
 - Start a [discussion](https://github.com/bashbobby3-droid/droid-project/discussions) for broader conversations
 
 We're a friendly bunch and happy to help. 😊
